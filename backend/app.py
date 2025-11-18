@@ -104,15 +104,25 @@ class RadarProcessor:
         
         try:
             # Suppress ECCODES warnings (time truncation warnings are harmless)
-            # Use multiple methods to ensure warnings are suppressed
+            # ECCODES writes directly to file descriptor 2, so we need to redirect at FD level
             import sys
-            old_stderr = sys.stderr
-            old_stdout = sys.stdout
             
-            # Redirect both stderr and stdout to /dev/null
-            with open(os.devnull, 'w') as devnull:
-                sys.stderr = devnull
-                sys.stdout = devnull
+            # Save original stderr file descriptor
+            stderr_fd = sys.stderr.fileno()
+            stdout_fd = sys.stdout.fileno()
+            
+            # Open /dev/null for writing
+            devnull_fd = os.open(os.devnull, os.O_WRONLY)
+            
+            try:
+                # Save original stderr/stdout file descriptors
+                saved_stderr = os.dup(stderr_fd)
+                saved_stdout = os.dup(stdout_fd)
+                
+                # Redirect file descriptors 1 (stdout) and 2 (stderr) to /dev/null
+                os.dup2(devnull_fd, stderr_fd)
+                os.dup2(devnull_fd, stdout_fd)
+                
                 try:
                     # Use context manager to ensure dataset is closed
                     with xr.open_dataset(str(temp_grib), engine="cfgrib") as ds:
@@ -191,9 +201,14 @@ class RadarProcessor:
                         # Dataset will be automatically closed by context manager
                         return values, lats_2d, lons_2d, timestamp
                 finally:
-                    # Restore stderr and stdout
-                    sys.stderr = old_stderr
-                    sys.stdout = old_stdout
+                    # Restore original file descriptors
+                    os.dup2(saved_stderr, stderr_fd)
+                    os.dup2(saved_stdout, stdout_fd)
+                    os.close(saved_stderr)
+                    os.close(saved_stdout)
+            finally:
+                # Close /dev/null file descriptor
+                os.close(devnull_fd)
             
         except Exception as e:
             raise HTTPException(

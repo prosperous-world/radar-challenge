@@ -4,6 +4,7 @@ Fetches RALA data from NOAA, processes GRIB2 files, and serves radar images.
 """
 import io
 import gzip
+import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,13 +16,28 @@ from fastapi import FastAPI, Response, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
 import xarray as xr
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
+
+
 
 app = FastAPI(title="MRMS Radar API")
+
+# Get allowed origins from environment variable
+# Expected format: "http://localhost:3000,http://localhost:8080,https://example.com"
+ALLOW_ORIGINS_ENV = os.getenv("ALLOW_ORIGINS", "*")
+if ALLOW_ORIGINS_ENV == "*":
+    allow_origins = ["*"]
+else:
+    # Split comma-separated origins and strip whitespace
+    allow_origins = [origin.strip() for origin in ALLOW_ORIGINS_ENV.split(",") if origin.strip()]
 
 # CORS middleware to allow frontend to access the API
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, specify your frontend domain
+    allow_origins=allow_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

@@ -1,0 +1,22 @@
+#!/bin/bash
+# Startup script for backend
+
+echo "Starting MRMS Radar Backend..."
+
+# Check if virtual environment exists
+if [ ! -d "venv" ]; then
+    echo "Creating virtual environment..."
+    python3 -m venv venv
+fi
+
+# Activate virtual environment
+source venv/bin/activate
+
+# Install dependencies
+echo "Installing dependencies..."
+pip install -r requirements.txt
+
+# Run the server
+echo "Starting server on http://0.0.0.0:8000"
+uvicorn app:app --host 0.0.0.0 --port 8000 --reload
+

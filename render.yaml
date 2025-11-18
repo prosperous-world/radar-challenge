@@ -1,0 +1,24 @@
+# Render deployment configuration
+# For backend deployment
+services:
+  - type: web
+    name: mrms-radar-api
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.10.8
+    # Note: You may need to add system packages for eccodes
+    # This might require using Docker instead
+
+# For frontend deployment (static site)
+  - type: web
+    name: mrms-radar-frontend
+    env: static
+    buildCommand: npm install && npm run build
+    staticPublishPath: dist
+    envVars:
+      - key: VITE_API_URL
+        value: https://mrms-radar-api.onrender.com  # Update with your backend URL
+

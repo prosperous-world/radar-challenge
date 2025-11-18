@@ -6,6 +6,7 @@ import io
 import gzip
 import os
 import time
+from contextlib import redirect_stderr
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Dict, Any
@@ -92,8 +93,12 @@ class RadarProcessor:
         temp_grib.write_bytes(grib_bytes)
         
         try:
-            # Open with xarray + cfgrib
-            ds = xr.open_dataset(str(temp_grib), engine="cfgrib")
+            # Suppress ECCODES warnings (time truncation warnings are harmless)
+            # Redirect stderr to suppress eccodes library warnings
+            with open(os.devnull, 'w') as devnull:
+                with redirect_stderr(devnull):
+                    # Open with xarray + cfgrib
+                    ds = xr.open_dataset(str(temp_grib), engine="cfgrib")
             
             # Find the reflectivity variable (name may vary)
             data_vars = list(ds.data_vars)

@@ -23,7 +23,12 @@ from dotenv import load_dotenv
 # Load environment variables from .env file
 load_dotenv()
 
-
+# Suppress ECCODES warnings by setting environment variables
+# These must be set before importing/using cfgrib
+os.environ['ECCODES_DEBUG'] = '0'  # Disable ECCODES debug output
+os.environ['ECCODES_LOG_STREAM'] = '/dev/null'  # Redirect ECCODES log to /dev/null
+# Alternative: suppress all ECCODES messages
+os.environ['GRIB_API_LOG_STREAM'] = '/dev/null'
 
 app = FastAPI(title="MRMS Radar API")
 
@@ -99,9 +104,16 @@ class RadarProcessor:
         
         try:
             # Suppress ECCODES warnings (time truncation warnings are harmless)
-            # Redirect stderr to suppress eccodes library warnings
+            # Use multiple methods to ensure warnings are suppressed
+            import sys
+            old_stderr = sys.stderr
+            old_stdout = sys.stdout
+            
+            # Redirect both stderr and stdout to /dev/null
             with open(os.devnull, 'w') as devnull:
-                with redirect_stderr(devnull):
+                sys.stderr = devnull
+                sys.stdout = devnull
+                try:
                     # Use context manager to ensure dataset is closed
                     with xr.open_dataset(str(temp_grib), engine="cfgrib") as ds:
                         # Find the reflectivity variable (name may vary)
@@ -178,6 +190,10 @@ class RadarProcessor:
                         
                         # Dataset will be automatically closed by context manager
                         return values, lats_2d, lons_2d, timestamp
+                finally:
+                    # Restore stderr and stdout
+                    sys.stderr = old_stderr
+                    sys.stdout = old_stdout
             
         except Exception as e:
             raise HTTPException(

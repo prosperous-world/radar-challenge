@@ -21,6 +21,11 @@ COPY app.py .
 # Create cache directory
 RUN mkdir -p /tmp/radar_cache
 
+# Set environment variables to suppress ECCODES warnings
+ENV ECCODES_DEBUG=0
+ENV ECCODES_LOG_STREAM=/dev/null
+ENV GRIB_API_LOG_STREAM=/dev/null
+
 # Expose port
 EXPOSE 8000
 

@@ -14,7 +14,8 @@ export default defineConfig({
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api/, '')
       }
-    }
+    },
+    allowedHosts: [ process.env.ALLOWED_HOST || 'localhost']
   }
 })
 

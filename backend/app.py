@@ -2,6 +2,7 @@
 FastAPI backend for MRMS Radar visualization.
 Fetches RALA data from NOAA, processes GRIB2 files, and serves radar images.
 """
+import gc
 import io
 import gzip
 import os
@@ -56,6 +57,9 @@ CACHE_DURATION_SECONDS = 180  # 3 minutes
 MIN_DBZ = -10
 MAX_DBZ = 70
 
+# Memory optimization: downsample factor (1 = no downsampling, 2 = half resolution, etc.)
+DOWNSAMPLE_FACTOR = 2  # Reduce memory usage by downsampling data
+
 
 class RadarProcessor:
     """Handles fetching, parsing, and rendering MRMS radar data."""
@@ -87,6 +91,7 @@ class RadarProcessor:
         """
         Parse GRIB2 file and extract reflectivity data and metadata.
         Returns: (values_2d, lats, lons, timestamp)
+        Memory optimized: uses context manager and downsampling.
         """
         # Write to temporary file for cfgrib
         temp_grib = CACHE_DIR / "temp_rala.grib2"
@@ -97,63 +102,82 @@ class RadarProcessor:
             # Redirect stderr to suppress eccodes library warnings
             with open(os.devnull, 'w') as devnull:
                 with redirect_stderr(devnull):
-                    # Open with xarray + cfgrib
-                    ds = xr.open_dataset(str(temp_grib), engine="cfgrib")
-            
-            # Find the reflectivity variable (name may vary)
-            data_vars = list(ds.data_vars)
-            if not data_vars:
-                raise ValueError("No data variables found in GRIB file")
-            
-            # Try common variable names
-            var_name = None
-            for name in ['ReflectivityAtLowestAltitude', 'unknown', 'r', 'ref']:
-                if name in data_vars:
-                    var_name = name
-                    break
-            
-            if var_name is None:
-                var_name = data_vars[0]
-            
-            data_array = ds[var_name]
-            
-            # Extract values
-            values = data_array.values  # 2D numpy array
-            
-            # Get coordinates
-            if 'latitude' in ds.coords and 'longitude' in ds.coords:
-                lats = ds.coords['latitude'].values
-                lons = ds.coords['longitude'].values
-                # If 1D, create meshgrid
-                if lats.ndim == 1 and lons.ndim == 1:
-                    lons_2d, lats_2d = np.meshgrid(lons, lats)
-                else:
-                    lats_2d = lats
-                    lons_2d = lons
-            else:
-                # Fallback: try to get from attributes or use defaults
-                # MRMS CONUS grid is roughly 19.9 to 54.9 N, -130 to -60 W
-                # with 0.01 degree resolution
-                nrows, ncols = values.shape
-                lats_2d = np.linspace(19.9, 54.9, nrows)
-                lons_2d = np.linspace(-130.0, -60.0, ncols)
-                lons_2d, lats_2d = np.meshgrid(lons_2d, lats_2d)
-            
-            # Get timestamp from attributes or use current time
-            timestamp = None
-            if 'time' in ds.coords:
-                time_val = ds.coords['time'].values
-                if hasattr(time_val, 'item'):
-                    timestamp = time_val.item()
-                else:
-                    timestamp = str(time_val)
-            
-            if timestamp is None:
-                # Try to get from file attributes
-                timestamp = datetime.now(timezone.utc).isoformat()
-            
-            ds.close()
-            return values, lats_2d, lons_2d, timestamp
+                    # Use context manager to ensure dataset is closed
+                    with xr.open_dataset(str(temp_grib), engine="cfgrib") as ds:
+                        # Find the reflectivity variable (name may vary)
+                        data_vars = list(ds.data_vars)
+                        if not data_vars:
+                            raise ValueError("No data variables found in GRIB file")
+                        
+                        # Try common variable names
+                        var_name = None
+                        for name in ['ReflectivityAtLowestAltitude', 'unknown', 'r', 'ref']:
+                            if name in data_vars:
+                                var_name = name
+                                break
+                        
+                        if var_name is None:
+                            var_name = data_vars[0]
+                        
+                        data_array = ds[var_name]
+                        
+                        # Downsample to reduce memory usage
+                        if DOWNSAMPLE_FACTOR > 1:
+                            # Use xarray's isel to downsample
+                            data_array = data_array.isel(
+                                {dim: slice(None, None, DOWNSAMPLE_FACTOR) 
+                                 for dim in data_array.dims}
+                            )
+                        
+                        # Extract values (load into memory)
+                        values = data_array.values.copy()  # Copy to ensure data is in memory
+                        
+                        # Get coordinates
+                        if 'latitude' in ds.coords and 'longitude' in ds.coords:
+                            lats = ds.coords['latitude'].values
+                            lons = ds.coords['longitude'].values
+                            
+                            # Downsample coordinates if we downsampled data
+                            if DOWNSAMPLE_FACTOR > 1:
+                                if lats.ndim == 1:
+                                    lats = lats[::DOWNSAMPLE_FACTOR]
+                                if lons.ndim == 1:
+                                    lons = lons[::DOWNSAMPLE_FACTOR]
+                            
+                            # If 1D, create meshgrid
+                            if lats.ndim == 1 and lons.ndim == 1:
+                                lons_2d, lats_2d = np.meshgrid(lons, lats)
+                            else:
+                                # Downsample 2D coordinates
+                                if DOWNSAMPLE_FACTOR > 1:
+                                    lats_2d = lats[::DOWNSAMPLE_FACTOR, ::DOWNSAMPLE_FACTOR]
+                                    lons_2d = lons[::DOWNSAMPLE_FACTOR, ::DOWNSAMPLE_FACTOR]
+                                else:
+                                    lats_2d = lats
+                                    lons_2d = lons
+                        else:
+                            # Fallback: try to get from attributes or use defaults
+                            # MRMS CONUS grid is roughly 19.9 to 54.9 N, -130 to -60 W
+                            nrows, ncols = values.shape
+                            lats_2d = np.linspace(19.9, 54.9, nrows)
+                            lons_2d = np.linspace(-130.0, -60.0, ncols)
+                            lons_2d, lats_2d = np.meshgrid(lons_2d, lats_2d)
+                        
+                        # Get timestamp from attributes or use current time
+                        timestamp = None
+                        if 'time' in ds.coords:
+                            time_val = ds.coords['time'].values
+                            if hasattr(time_val, 'item'):
+                                timestamp = time_val.item()
+                            else:
+                                timestamp = str(time_val)
+                        
+                        if timestamp is None:
+                            # Try to get from file attributes
+                            timestamp = datetime.now(timezone.utc).isoformat()
+                        
+                        # Dataset will be automatically closed by context manager
+                        return values, lats_2d, lons_2d, timestamp
             
         except Exception as e:
             raise HTTPException(
@@ -164,6 +188,8 @@ class RadarProcessor:
             # Clean up temp file
             if temp_grib.exists():
                 temp_grib.unlink()
+            # Force garbage collection
+            gc.collect()
     
     def dbz_to_rgba(self, norm_val: float) -> tuple:
         """
@@ -194,11 +220,12 @@ class RadarProcessor:
         """
         Convert reflectivity values to a colored PNG image.
         Uses vectorized operations for better performance.
+        Memory optimized: processes in-place where possible.
         """
         # Clip and normalize values
         clipped = np.clip(values, MIN_DBZ, MAX_DBZ)
-        # Handle NaN values
-        clipped = np.nan_to_num(clipped, nan=MIN_DBZ)
+        # Handle NaN values (in-place to save memory)
+        np.nan_to_num(clipped, nan=MIN_DBZ, copy=False)
         norm = (clipped - MIN_DBZ) / (MAX_DBZ - MIN_DBZ)
         
         # Create RGBA array
@@ -212,52 +239,62 @@ class RadarProcessor:
         
         # Green to yellow (0.2-0.4)
         mask2 = (norm >= 0.2) & (norm < 0.4)
-        t2 = (norm[mask2] - 0.2) / 0.2
-        rgba[mask2] = np.column_stack([
-            (255 * t2).astype(np.uint8),
-            np.full(len(t2), 200, dtype=np.uint8),
-            np.zeros(len(t2), dtype=np.uint8),
-            np.full(len(t2), 150, dtype=np.uint8)
-        ])
+        if np.any(mask2):
+            t2 = (norm[mask2] - 0.2) / 0.2
+            rgba[mask2] = np.column_stack([
+                (255 * t2).astype(np.uint8),
+                np.full(len(t2), 200, dtype=np.uint8),
+                np.zeros(len(t2), dtype=np.uint8),
+                np.full(len(t2), 150, dtype=np.uint8)
+            ])
         
         # Yellow to orange (0.4-0.6)
         mask3 = (norm >= 0.4) & (norm < 0.6)
-        t3 = (norm[mask3] - 0.4) / 0.2
-        rgba[mask3] = np.column_stack([
-            np.full(len(t3), 255, dtype=np.uint8),
-            (200 * (1 - t3)).astype(np.uint8),
-            np.zeros(len(t3), dtype=np.uint8),
-            np.full(len(t3), 180, dtype=np.uint8)
-        ])
+        if np.any(mask3):
+            t3 = (norm[mask3] - 0.4) / 0.2
+            rgba[mask3] = np.column_stack([
+                np.full(len(t3), 255, dtype=np.uint8),
+                (200 * (1 - t3)).astype(np.uint8),
+                np.zeros(len(t3), dtype=np.uint8),
+                np.full(len(t3), 180, dtype=np.uint8)
+            ])
         
         # Orange to red (0.6-0.8)
         mask4 = (norm >= 0.6) & (norm < 0.8)
-        t4 = (norm[mask4] - 0.6) / 0.2
-        rgba[mask4] = np.column_stack([
-            np.full(len(t4), 255, dtype=np.uint8),
-            (100 * (1 - t4)).astype(np.uint8),
-            np.zeros(len(t4), dtype=np.uint8),
-            np.full(len(t4), 200, dtype=np.uint8)
-        ])
+        if np.any(mask4):
+            t4 = (norm[mask4] - 0.6) / 0.2
+            rgba[mask4] = np.column_stack([
+                np.full(len(t4), 255, dtype=np.uint8),
+                (100 * (1 - t4)).astype(np.uint8),
+                np.zeros(len(t4), dtype=np.uint8),
+                np.full(len(t4), 200, dtype=np.uint8)
+            ])
         
         # Red to purple (0.8-1.0)
         mask5 = norm >= 0.8
-        t5 = (norm[mask5] - 0.8) / 0.2
-        rgba[mask5] = np.column_stack([
-            (255 * (1 - t5 * 0.5)).astype(np.uint8),
-            np.zeros(len(t5), dtype=np.uint8),
-            (255 * t5 * 0.5).astype(np.uint8),
-            np.full(len(t5), 220, dtype=np.uint8)
-        ])
+        if np.any(mask5):
+            t5 = (norm[mask5] - 0.8) / 0.2
+            rgba[mask5] = np.column_stack([
+                (255 * (1 - t5 * 0.5)).astype(np.uint8),
+                np.zeros(len(t5), dtype=np.uint8),
+                (255 * t5 * 0.5).astype(np.uint8),
+                np.full(len(t5), 220, dtype=np.uint8)
+            ])
         
         # Create PIL Image
         img = Image.fromarray(rgba, mode='RGBA')
+        
+        # Clean up large arrays
+        del rgba, norm, clipped, mask1, mask2, mask3, mask4, mask5
+        gc.collect()
+        
         return img
     
     def process_radar_data(self, force_refresh: bool = False) -> Dict[str, Any]:
         """
         Main processing function: fetch, parse, and render radar data.
         Returns metadata dict with bounds, timestamp, and image path.
+        Memory optimized: cleans up large objects immediately after use.
         """
         current_time = time.time()
         
@@ -272,23 +309,41 @@ class RadarProcessor:
         gzipped_data = self.fetch_grib_data()
         grib_bytes = self.decompress_grib(gzipped_data)
         
+        # Clean up compressed data immediately
+        del gzipped_data
+        gc.collect()
+        
         # Parse GRIB2
         print("Parsing GRIB2 file...")
         values, lats, lons, timestamp = self.parse_grib2(grib_bytes)
         
-        # Compute bounds
+        # Clean up GRIB bytes immediately
+        del grib_bytes
+        gc.collect()
+        
+        # Compute bounds before creating image
         north = float(np.nanmax(lats))
         south = float(np.nanmin(lats))
         east = float(np.nanmax(lons))
         west = float(np.nanmin(lons))
+        min_dbz = float(np.nanmin(values))
+        max_dbz = float(np.nanmax(values))
         
         # Create image
         print("Rendering radar image...")
         img = self.create_radar_image(values, lats, lons)
         
+        # Clean up large arrays immediately
+        del values, lats, lons
+        gc.collect()
+        
         # Save image
         image_path = CACHE_DIR / "rala_latest.png"
-        img.save(image_path, format='PNG')
+        img.save(image_path, format='PNG', optimize=True)
+        
+        # Clean up image object
+        del img
+        gc.collect()
         
         # Update cache
         self.last_fetch_time = current_time
@@ -298,8 +353,8 @@ class RadarProcessor:
             "east": east,
             "west": west,
             "timestamp": str(timestamp),
-            "min_dbz": float(np.nanmin(values)),
-            "max_dbz": float(np.nanmax(values)),
+            "min_dbz": min_dbz,
+            "max_dbz": max_dbz,
         }
         self.cached_image_path = image_path
         
